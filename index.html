@@ -1,0 +1,257 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>PDF Table Quiz — extract answers from last page & test user</title>
+  <style>
+    body{font-family:system-ui,-apple-system,Segoe UI,Roboto,"Helvetica Neue",Arial;margin:18px;background:#f7f7fb}
+    .card{background:white;border-radius:12px;padding:18px;margin:12px 0;box-shadow:0 6px 18px rgba(20,20,50,0.06)}
+    .row{display:flex;flex-direction:column;gap:12px;margin-bottom:24px}
+    input[type=file]{display:block}
+    .clickable{cursor:pointer}
+    button{padding:6px 10px;border-radius:8px;border:1px solid rgba(0,0,0,0.08);background:#fff;margin:4px}
+    .ok{color:green;font-weight:700}
+    .bad{color:#c00;font-weight:700}
+    table{width:100%;border-collapse:collapse;margin-top:12px}
+    th,td{padding:8px;border-bottom:1px solid #eee;text-align:left}
+    .center{text-align:center}
+    .small{font-size:12px;color:#666}
+    canvas.pageCanvas{border:1px solid #ccc;max-width:100%;margin-bottom:8px}
+    #navControls{margin-top:12px;display:flex;justify-content:space-between}
+    .questionText{font-size:14px;margin-bottom:6px}
+    .answerOptions{display:flex;gap:12px}
+    .answerOptions label{font-size:14px;}
+  </style>
+</head>
+<body>
+  <h1>PDF Table Quiz</h1>
+  <div class="card">
+    <p>Upload a PDF. This tool extracts answers from the <strong>last page</strong>, then generates a quiz where each question is displayed alongside its corresponding PDF page. Navigate questions with Next/Previous and select your answer from 1-5.</p>
+    <div class="row" style="flex-direction:row;align-items:center">
+      <input id="pdfFile" type="file" accept="application/pdf" />
+      <button id="parseBtn" class="clickable">Extract answers from last page</button>
+    </div>
+  </div>
+
+  <div id="status" class="card small">No PDF loaded.</div>
+
+  <div id="quizArea" class="card" style="display:none">
+    <h2>Generated Quiz</h2>
+    <div id="questionContainer"></div>
+    <div id="navControls">
+      <button id="prevBtn" class="clickable">Previous</button>
+      <button id="nextBtn" class="clickable">Next</button>
+    </div>
+    <div style="margin-top:12px">
+      <button id="submitQuiz" class="clickable">Submit answers</button>
+      <button id="exportBtn" class="clickable">Export results to Excel</button>
+      <button id="exportCsvBtn" class="clickable">Export results to CSV</button>
+    </div>
+    <div id="results" style="margin-top:12px"></div>
+  </div>
+
+  <script src="https://unpkg.com/pdfjs-dist@3.9.179/build/pdf.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+  <script>
+    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://unpkg.com/pdfjs-dist@3.9.179/build/pdf.worker.min.js';
+
+    const pdfFileInput = document.getElementById('pdfFile');
+    const parseBtn = document.getElementById('parseBtn');
+    const status = document.getElementById('status');
+    const quizArea = document.getElementById('quizArea');
+    const questionContainer = document.getElementById('questionContainer');
+    const submitQuiz = document.getElementById('submitQuiz');
+    const results = document.getElementById('results');
+    const exportBtn = document.getElementById('exportBtn');
+    const exportCsvBtn = document.getElementById('exportCsvBtn');
+    const prevBtn = document.getElementById('prevBtn');
+    const nextBtn = document.getElementById('nextBtn');
+
+    let loadedPdf = null;
+    let answersMap = {};
+    let qNumbers = [];
+    let currentIndex = 0;
+
+    function setStatus(txt){ status.textContent = txt }
+
+    pdfFileInput.addEventListener('change', ()=>{
+      const f = pdfFileInput.files[0];
+      if(!f) { setStatus('No file chosen'); return }
+      const reader = new FileReader();
+      reader.onload = async function(e){
+        const data = new Uint8Array(e.target.result);
+        try{
+          loadedPdf = await pdfjsLib.getDocument({data}).promise;
+          setStatus('PDF loaded. Pages: ' + loadedPdf.numPages);
+        }catch(err){
+          setStatus('Error loading PDF: ' + err.message);
+          loadedPdf = null;
+        }
+      }
+      reader.readAsArrayBuffer(f);
+    })
+
+    async function extractLastPageText(){
+      if(!loadedPdf) { throw new Error('No PDF loaded') }
+      const last = loadedPdf.numPages;
+      const page = await loadedPdf.getPage(last);
+      const textContent = await page.getTextContent();
+      const items = textContent.items.map(i=>({str:i.str, x:i.transform[4], y:i.transform[5]}));
+      const linesMap = new Map();
+      items.forEach(it=>{
+        const y = Math.round(it.y);
+        if(!linesMap.has(y)) linesMap.set(y, []);
+        linesMap.get(y).push({x:it.x, str:it.str});
+      });
+      const lines = Array.from(linesMap.entries()).sort((a,b)=>b[0]-a[0]).map(([y,arr])=>{
+        arr.sort((a,b)=>a.x-b.x);
+        return arr.map(o=>o.str).join(' ');
+      });
+      return lines.join('\n');
+    }
+
+    function parseAnswersFromText(text){
+      const lines = text.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+      const map = {};
+      const re = /^(\d{1,3})[\.\)\-:\s]*\s*([A-Za-z0-9]+)\s*$/;
+      for(const l of lines){
+        const m = l.match(re);
+        if(m){
+          const q = parseInt(m[1],10);
+          map[q] = m[2];
+        }else{
+          const parts = l.split(/\s{2,}|\t|,|;/).map(p=>p.trim()).filter(Boolean);
+          for(let i=0;i<parts.length-1;i+=2){
+            if(/^\d+$/.test(parts[i]) && parts[i+1]){
+              const q = parseInt(parts[i],10);
+              map[q] = parts[i+1];
+            }
+          }
+        }
+      }
+      return {map};
+    }
+
+    parseBtn.addEventListener('click', async ()=>{
+      try{
+        if(!loadedPdf){ setStatus('Load a PDF first.'); return }
+        setStatus('Reading last page...');
+        const text = await extractLastPageText();
+        const parsed = parseAnswersFromText(text);
+        answersMap = parsed.map;
+        qNumbers = Object.keys(answersMap).map(s=>parseInt(s,10)).sort((a,b)=>a-b);
+        if(qNumbers.length===0){ setStatus('No answers found.'); quizArea.style.display='none'; return }
+        setStatus('Found answers for ' + qNumbers.length + ' questions.');
+        currentIndex = 0;
+        await showQuestion(currentIndex);
+        quizArea.style.display='block';
+      }catch(err){ setStatus('Error: ' + err.message) }
+    })
+
+    async function showQuestion(index){
+      if(index<0||index>=qNumbers.length) return;
+      questionContainer.innerHTML='';
+      const n = qNumbers[index];
+      const div = document.createElement('div');
+      div.className='row';
+
+      if(n <= loadedPdf.numPages){
+        const canvas = document.createElement('canvas');
+        canvas.className='pageCanvas';
+        div.appendChild(canvas);
+        const page = await loadedPdf.getPage(n);
+        const viewport = page.getViewport({scale:0.8});
+        canvas.width = viewport.width;
+        canvas.height = viewport.height;
+        await page.render({canvasContext: canvas.getContext('2d'), viewport}).promise;
+      }
+
+      const qText = document.createElement('div');
+      qText.className = 'questionText';
+      qText.textContent = 'Question ' + n + ':';
+      div.appendChild(qText);
+
+      const optionsDiv = document.createElement('div');
+      optionsDiv.className = 'answerOptions';
+      for(let i=1;i<=5;i++){
+        const label = document.createElement('label');
+        const radio = document.createElement('input');
+        radio.type='radio';
+        radio.name='q'+n;
+        radio.value=i;
+        if(window.userAnswers && window.userAnswers[n]==i) radio.checked=true;
+        radio.addEventListener('change', ()=>{
+          if(!window.userAnswers) window.userAnswers={};
+          window.userAnswers[n] = radio.value;
+        });
+        label.appendChild(radio);
+        label.appendChild(document.createTextNode(' '+i));
+        optionsDiv.appendChild(label);
+      }
+      div.appendChild(optionsDiv);
+      questionContainer.appendChild(div);
+
+      prevBtn.disabled = (index===0);
+      nextBtn.disabled = (index===qNumbers.length-1);
+    }
+
+    prevBtn.addEventListener('click', ()=>{ if(currentIndex>0){ currentIndex--; showQuestion(currentIndex); } });
+    nextBtn.addEventListener('click', ()=>{ if(currentIndex<qNumbers.length-1){ currentIndex++; showQuestion(currentIndex); } });
+
+    submitQuiz.addEventListener('click', ()=>{
+      const out = [];
+      for(const n of qNumbers){
+        const user = (window.userAnswers && window.userAnswers[n]) ? window.userAnswers[n].trim() : '';
+        const correct = answersMap[n] ? String(answersMap[n]).trim() : '';
+        const ok = (user!=='' && correct!=='' && user.toLowerCase()===correct.toLowerCase());
+        out.push({Question:n, CorrectAnswer:correct, UserAnswer:user, Result: ok ? 'Correct' : (user===''? 'No Answer' : 'Wrong')});
+      }
+      results.innerHTML = '';
+      const tbl = document.createElement('table');
+      tbl.innerHTML = '<thead><tr><th>Question</th><th>Correct</th><th>Your answer</th><th>Result</th></tr></thead>';
+      const tbody = document.createElement('tbody');
+      out.forEach(r=>{
+        const tr = document.createElement('tr');
+        tr.innerHTML = `<td>${r.Question}</td><td>${r.CorrectAnswer}</td><td>${r.UserAnswer}</td><td class=\"center ${r.Result==='Correct'?'ok':'bad'}\">${r.Result}</td>`;
+        tbody.appendChild(tr);
+      });
+      tbl.appendChild(tbody);
+      results.appendChild(tbl);
+      window.latestExport = out;
+    });
+
+    function exportToXlsx(data){
+      if(!data || !data.length) { alert('No results to export. Submit the quiz first.'); return }
+      const ws = XLSX.utils.json_to_sheet(data);
+      const wb = XLSX.utils.book_new();
+      XLSX.utils.book_append_sheet(wb, ws, 'Results');
+      const wbout = XLSX.write(wb, {bookType:'xlsx', type:'array'});
+      const blob = new Blob([wbout], {type:'application/octet-stream'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'quiz_results.xlsx';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    }
+
+    function exportToCsv(data){
+      if(!data || !data.length) { alert('No results to export. Submit the quiz first.'); return }
+      const header = Object.keys(data[0]);
+      const rows = data.map(r=>header.map(h=>`"${String(r[h]||'').replace(/"/g,'""')}"`).join(','));
+      const csv = [header.join(','), ...rows].join('\n');
+      const blob = new Blob([csv], {type:'text/csv;charset=utf-8;'});
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url; a.download = 'quiz_results.csv'; document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    }
+
+    exportBtn.addEventListener('click', ()=> exportToXlsx(window.latestExport));
+    exportCsvBtn.addEventListener('click', ()=> exportToCsv(window.latestExport));
+  </script>
+</body>
+</html>
