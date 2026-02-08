@@ -157,11 +157,15 @@
       const div = document.createElement('div');
       div.className='row';
 
-      if(n <= loadedPdf.numPages){
+      // Map the question index to a PDF page to ensure we always show a valid page.
+      // Use index+1 (1-based) but clamp to available pages.
+      const pdfPageNum = Math.min(Math.max(index + 1, 1), loadedPdf.numPages);
+
+      if(pdfPageNum >= 1 && pdfPageNum <= loadedPdf.numPages){
         const canvas = document.createElement('canvas');
         canvas.className='pageCanvas';
         div.appendChild(canvas);
-        const page = await loadedPdf.getPage(n);
+        const page = await loadedPdf.getPage(pdfPageNum);
         const viewport = page.getViewport({scale:0.8});
         canvas.width = viewport.width;
         canvas.height = viewport.height;
@@ -170,7 +174,8 @@
 
       const qText = document.createElement('div');
       qText.className = 'questionText';
-      qText.textContent = 'Question ' + n + ':';
+      // Show the real question number and which PDF page is displayed
+      qText.textContent = 'Question ' + n + (pdfPageNum ? (' — PDF page ' + pdfPageNum) : '');
       div.appendChild(qText);
 
       const optionsDiv = document.createElement('div');
